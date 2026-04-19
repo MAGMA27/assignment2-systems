@@ -58,15 +58,25 @@ for i in range(config.warmup_steps):
     loss.backward()
     torch.cuda.synchronize()
 
+torch.cuda.memory._record_memory_history(max_entries=1000000)
 start = timeit.default_timer()
 
 for i in range(config.test_steps):
     lm_head = model(data)
+    torch.cuda.synchronize()
+    print(timeit.default_timer()-start)
+
     loss = nn_utils.cross_entropy(lm_head, target)
+    torch.cuda.synchronize()
+    print(timeit.default_timer()-start)
+
     loss.backward()
     torch.cuda.synchronize()
+    print(timeit.default_timer()-start)
 
 end = timeit.default_timer()
 elapsed = (end - start) / config.test_steps
+torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+torch.cuda.memory._record_memory_history(enabled=None)
 
 print(f"代码执行耗时: {elapsed} 秒")
