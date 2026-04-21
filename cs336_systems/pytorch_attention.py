@@ -1,8 +1,10 @@
 import torch
+import torch.nn as nn
 import itertools
-import time
+import timeit
 import pandas as pd
 import math
+import numpy as np
 
 # 设置随机种子以确保可重现性
 torch.manual_seed(42)
@@ -19,27 +21,34 @@ seq_len_values = [256, 1024, 4096, 8192, 16384]
 # 用于存储结果
 results = []
 
+class atten_layer(nn.Module):
+    def __init__(self, Q, K, V):
+        super().__init__()
+        self.Q = Q
+        self.K = K
+        self.V = V
+
+    # 前向传播
+    def forward(self):
+        # 计算注意力分数
+        scores = torch.matmul(self.Q, self.K.transpose(-2, -1)) / math.sqrt(self.Q.size(-1))
+        # 应用softmax
+        attn = torch.softmax(scores, dim=-1)
+        # 计算输出
+        output = torch.matmul(attn, self.V)
+        return output
+
+    # 反向传播
+    def backward_pass(self, output):
+        loss = output.sum()
+        loss.backward()
+
 # 生成随机输入
 def generate_random_inputs(batch_size, seq_len, d_model):
-    Q = torch.randn(batch_size, seq_len, d_model).cuda()
-    K = torch.randn(batch_size, seq_len, d_model).cuda()
-    V = torch.randn(batch_size, seq_len, d_model).cuda()
+    Q = torch.randn(batch_size, seq_len, d_model, requires_grad=True).cuda()
+    K = torch.randn(batch_size, seq_len, d_model, requires_grad=True).cuda()
+    V = torch.randn(batch_size, seq_len, d_model, requires_grad=True).cuda()
     return Q, K, V
-
-# 前向传播
-def forward_pass(Q, K, V):
-    # 计算注意力分数
-    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(Q.size(-1))
-    # 应用softmax
-    attn = torch.softmax(scores, dim=-1)
-    # 计算输出
-    output = torch.matmul(attn, V)
-    return output
-
-# 反向传播
-def backward_pass(output):
-    loss = output.sum()
-    loss.backward()
 
 # 主测试函数
 def run_benchmark():
@@ -47,37 +56,48 @@ def run_benchmark():
         try:
             # 生成随机输入
             Q, K, V = generate_random_inputs(batch_size, seq_len, d_model)
+
+            atten = atten_layer(Q, K, V)
+            atten = torch.compile(atten)
             
             # 预热
-            for _ in range(10):
-                output = forward_pass(Q, K, V)
-                torch.cuda.synchronize()
-            
-            # 前向传播计时
-            start_time = time.time()
-            for _ in range(100):
-                output = forward_pass(Q, K, V)
-                torch.cuda.synchronize()
-            forward_time = time.time() - start_time
-            
-            # 测量内存占用
+            for _ in range(5):
+                output = atten()
+                atten.backward_pass(output)
+
             torch.cuda.synchronize()
-            mem_before_backward = torch.cuda.memory_allocated()
+
+            forward_time_lst = []
+            mem_before_backward_lst = []
+            backward_time_lst = []
             
-            # 反向传播计时
-            start_time = time.time()
-            for _ in range(100):
-                backward_pass(output)
+            for _ in range(10):
+                # 前向传播计时
+                start_time = timeit.default_timer()
+                output = atten()
                 torch.cuda.synchronize()
-            backward_time = time.time() - start_time
+                forward_time = timeit.default_timer() - start_time
+                forward_time_lst.append(forward_time)
+
+                # 测量内存占用
+                torch.cuda.synchronize()
+                mem_before_backward = torch.cuda.memory_allocated()
+                mem_before_backward_lst.append(mem_before_backward)
+                
+                # 反向传播计时
+                start_time = timeit.default_timer()
+                atten.backward_pass(output)
+                torch.cuda.synchronize()
+                backward_time = timeit.default_timer() - start_time
+                backward_time_lst.append(backward_time)
             
             # 记录结果
             results.append({
                 'd_model': d_model,
                 'seq_len': seq_len,
-                'forward_time': forward_time,
-                'backward_time': backward_time,
-                'mem_before_backward': mem_before_backward
+                'forward_time': np.mean(forward_time_lst),
+                'backward_time': np.mean(backward_time_lst),
+                'mem_before_backward': np.mean(mem_before_backward_lst)
             })
             
             print(f"Completed: d_model={d_model}, seq_len={seq_len}")
@@ -94,9 +114,11 @@ def run_benchmark():
             else:
                 raise e
 
-# 运行测试
-run_benchmark()
 
-# 保存结果到CSV
-df = pd.DataFrame(results)
-df.to_csv('attention_benchmark_results.csv', index=False)
+if __name__ == "__main__":
+    # 运行测试
+    run_benchmark()
+
+    # 保存结果到CSV
+    df = pd.DataFrame(results)
+    df.to_csv('attention_benchmark_results_compiled.csv', index=False)
